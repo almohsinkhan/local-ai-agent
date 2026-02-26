@@ -9,13 +9,12 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
+from app.observability import langsmith_traceable, timed
 from app.tools.calendar import add_event, list_events, now_utc_iso
 from app.tools.gmail import get_emails, send_email
 from app.tools.search import web_search, get_latest_news
 
 load_dotenv()
-if not os.getenv("GROQ_API_KEY"):
-    load_dotenv(".env.example")
 
 MODEL_NAME = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY", "") or "").strip().strip('"').strip("'")
@@ -156,6 +155,8 @@ Do not answer the user. Only output valid JSON.
 """
 
 
+@langsmith_traceable(name="plan_action", run_type="chain")
+@timed("plan_action")
 def plan_action(state: AgentState) -> AgentState:
   
 
@@ -207,6 +208,8 @@ def route_after_plan(state: AgentState):
 
 # TOOL EXECUTION 
 
+@langsmith_traceable(name="execute_action", run_type="tool")
+@timed("execute_action")
 def execute_action(state: AgentState) -> AgentState:
     action = state.get("planned_action", {})
     name = action.get("name")
@@ -258,6 +261,8 @@ def execute_action(state: AgentState) -> AgentState:
 
 # EMAIL ANALYZER 
 
+@langsmith_traceable(name="analyze_emails", run_type="chain")
+@timed("analyze_emails")
 def analyze_emails(state: AgentState) -> AgentState:
     last = state.get("last_result", {})
     if not last.get("ok") or last.get("action") != "get_emails":
@@ -319,6 +324,8 @@ Return:
 
 # RESPONDER 
 
+@langsmith_traceable(name="respond", run_type="chain")
+@timed("respond")
 def respond(state: AgentState) -> AgentState:
     action = state.get("planned_action", {}).get("name")
 

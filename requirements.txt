@@ -1,6 +1,7 @@
 langgraph>=0.2.45
 langchain-core>=0.3.0
 langchain-groq>=0.2.0
+langsmith>=0.1.147
 python-dotenv>=1.0.1
 google-api-python-client>=2.154.0
 google-auth>=2.36.0

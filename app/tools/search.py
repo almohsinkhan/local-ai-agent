@@ -4,9 +4,13 @@ from dotenv import load_dotenv
 from ddgs import DDGS
 import feedparser
 
+from app.observability import langsmith_traceable, timed
+
 load_dotenv()
 
 
+@langsmith_traceable(name="web_search", run_type="tool")
+@timed("web_search")
 def web_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
     """Try Tavily first (if configured), fallback to DuckDuckGo."""
 
@@ -57,6 +61,8 @@ def web_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
         print("DDGS search failed:", e)
         return []
     
+@langsmith_traceable(name="get_latest_news", run_type="tool")
+@timed("get_latest_news")
 def get_latest_news(max_results=5):
     feeds = [
         "https://feeds.bbci.co.uk/news/rss.xml",

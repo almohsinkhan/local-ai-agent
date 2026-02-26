@@ -9,6 +9,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from app.observability import langsmith_traceable, timed
 load_dotenv()
 
 SCOPES = [
@@ -48,6 +49,8 @@ def _calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 
+@langsmith_traceable(name="list_events", run_type="tool")
+@timed("list_events")
 def list_events(time_min: str, time_max: str, max_results: int = 10) -> list[dict[str, Any]]:
     """List events in a time window (ISO8601 timestamps)."""
     service = _calendar_service()
@@ -80,6 +83,8 @@ def list_events(time_min: str, time_max: str, max_results: int = 10) -> list[dic
     return output
 
 
+@langsmith_traceable(name="add_event", run_type="tool")
+@timed("add_event")
 def add_event(summary: str, start_iso: str, end_iso: str, description: str = "", location: str = "") -> dict[str, Any]:
     """Create an event. Keep this behind human approval in the graph."""
     service = _calendar_service()

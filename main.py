@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.graph import GUARDED_ACTIONS, build_graph
+from app.observability import langsmith_traceable, timed, timed_block
 
 load_dotenv()
 if not os.getenv("GROQ_API_KEY"):
@@ -18,6 +19,8 @@ def _last_ai_text(messages) -> str:
     return ""
 
 
+@langsmith_traceable(name="handle_interrupts", run_type="chain")
+@timed("handle_interrupts")
 def _handle_interrupts(app, config) -> None:
     while True:
         snapshot = app.get_state(config)
@@ -65,8 +68,9 @@ def run_chat() -> None:
             break
 
         try:
-            app.invoke({"messages": [HumanMessage(content=user_input)]}, config=config)
-            _handle_interrupts(app, config)
+            with timed_block("chat_turn"):
+                app.invoke({"messages": [HumanMessage(content=user_input)]}, config=config)
+                _handle_interrupts(app, config)
         except Exception as exc:
             print(f"\nAgent error: {exc}")
             continue

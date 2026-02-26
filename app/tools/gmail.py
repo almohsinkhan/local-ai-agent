@@ -10,6 +10,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from app.observability import langsmith_traceable, timed
 
 load_dotenv()
 
@@ -62,6 +63,8 @@ def _extract_body(payload) -> str:
 
 
 
+@langsmith_traceable(name="get_emails", run_type="tool")
+@timed("get_emails")
 def get_emails(query: str = "is:unread", max_results: int = 5) -> list[dict[str, Any]]:
     service = _gmail_service()
     response = (
@@ -103,6 +106,8 @@ def get_emails(query: str = "is:unread", max_results: int = 5) -> list[dict[str,
     return output
 
 
+@langsmith_traceable(name="send_email", run_type="tool")
+@timed("send_email")
 def send_email(to: str, subject: str, body: str):
     service = _gmail_service()
 

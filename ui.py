@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.graph import GUARDED_ACTIONS, build_graph
+from app.observability import langsmith_traceable, timed, timed_block
 
 load_dotenv()
 if not os.getenv("GROQ_API_KEY"):
@@ -56,15 +57,21 @@ def _sync_pending_approval(app) -> None:
         _sync_pending_approval(app)
 
 
+@langsmith_traceable(name="ui_run_user_turn", run_type="chain")
+@timed("ui_run_user_turn")
 def _run_user_turn(app, user_text: str) -> None:
-    app.invoke({"messages": [HumanMessage(content=user_text)]}, config=st.session_state.config)
-    _sync_pending_approval(app)
+    with timed_block("ui_chat_turn"):
+        app.invoke({"messages": [HumanMessage(content=user_text)]}, config=st.session_state.config)
+        _sync_pending_approval(app)
 
 
+@langsmith_traceable(name="ui_resume_with_approval", run_type="chain")
+@timed("ui_resume_with_approval")
 def _resume_with_approval(app, approved: bool) -> None:
-    app.update_state(st.session_state.config, {"human_approved": approved})
-    app.invoke(None, config=st.session_state.config)
-    _sync_pending_approval(app)
+    with timed_block("ui_approval_resume"):
+        app.update_state(st.session_state.config, {"human_approved": approved})
+        app.invoke(None, config=st.session_state.config)
+        _sync_pending_approval(app)
 
 
 def _render_chat(app) -> None:

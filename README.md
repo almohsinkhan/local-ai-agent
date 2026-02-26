@@ -14,6 +14,9 @@ A local AI assistant that uses LangGraph orchestration with Groq LLMs and option
 - Search actions
   - Web search (Tavily if configured, otherwise DuckDuckGo)
   - Latest news headlines from RSS feeds
+- Observability
+  - LangSmith tracing for graph nodes, tools, and turn execution
+  - Local execution timing logs for key steps
 - Two interfaces
   - CLI chat (`main.py`)
   - Streamlit UI (`ui.py`)
@@ -26,6 +29,7 @@ A local AI assistant that uses LangGraph orchestration with Groq LLMs and option
 - Google APIs (Gmail + Calendar OAuth)
 - DDGS / Tavily
 - Streamlit
+- LangSmith SDK
 
 ## Project Structure
 
@@ -85,6 +89,19 @@ TAVILY_API_KEY=your_tavily_key
 
 If `TAVILY_API_KEY` is not set, web search falls back to DuckDuckGo.
 
+6. Enable tracing and timing:
+
+```env
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your_langsmith_api_key
+LANGSMITH_PROJECT=local-agent
+ENABLE_TIME_TRACKING=true
+```
+
+With `ENABLE_TIME_TRACKING=true`, the app prints timing lines like:
+- `[timing] plan_action: 120.52 ms`
+- `[timing] chat_turn: 954.10 ms`
+
 ## Google OAuth Setup (Gmail + Calendar)
 
 1. In Google Cloud Console, enable:
@@ -135,6 +152,11 @@ Defined in `.env.example`:
 
 - `GROQ_MODEL` (default: `openai/gpt-oss-120b`)
 - `GROQ_API_KEY`
+- `LANGSMITH_TRACING` (default in sample: `true`)
+- `LANGSMITH_API_KEY`
+- `LANGSMITH_PROJECT` (example: `local-agent`)
+- `LANGSMITH_ENDPOINT` (optional; defaults to LangSmith cloud endpoint)
+- `ENABLE_TIME_TRACKING` (default in sample: `true`)
 - `TAVILY_API_KEY` (optional)
 - `GOOGLE_CLIENT_SECRET_FILE`
 - `GOOGLE_TOKEN_FILE`
