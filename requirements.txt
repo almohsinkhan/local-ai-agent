@@ -1,0 +1,12 @@
+langgraph>=0.2.45
+langchain-core>=0.3.0
+langchain-groq>=0.2.0
+python-dotenv>=1.0.1
+google-api-python-client>=2.154.0
+google-auth>=2.36.0
+google-auth-oauthlib>=1.2.1
+tavily-python>=0.5.0
+duckduckgo-search>=7.3.0
+ddgs>=9.6.1
+feedparser>=6.0.12
+streamlit>=1.43.0
