@@ -21,8 +21,14 @@ MODEL_NAME = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY", "") or "").strip().strip('"').strip("'")
 GUARDED_ACTIONS = {"send_email", "add_event"}
 
+# create llm instance
+LLM = ChatGroq(
+    model=MODEL_NAME,
+    temperature=0,
+    api_key=GROQ_API_KEY
+)
 
-# ================= STATE ================= #
+#STATE 
 
 class PlannedAction(TypedDict, total=False):
     name: Literal[
@@ -46,8 +52,7 @@ class AgentState(TypedDict, total=False):
     human_approved: bool | None
 
 
-# ================= UTIL ================= #
-
+# UTIL 
 def _extract_json(raw: str) -> dict[str, Any]:
     try:
         raw = raw.strip()
@@ -58,29 +63,21 @@ def _extract_json(raw: str) -> dict[str, Any]:
         return json.loads(raw)
     except Exception:
         return {}
-
-
-def _llm(temperature: float = 0) -> ChatGroq:
-    if not GROQ_API_KEY:
-        raise RuntimeError("Missing GROQ_API_KEY. Add it to .env or export it in your shell.")
-    return ChatGroq(model=MODEL_NAME, temperature=temperature, api_key=GROQ_API_KEY)
-
-
-def calculate_priority(data: dict) -> int:
+    
+def calculate_priority(email_data: dict) -> int:
     score = 0
-    if data.get("importance") == "important":
-        score += 3
-    if data.get("requires_reply"):
+    if email_data.get("importance") == "high":
         score += 2
-    if data.get("deadline"):
-        score += 3
-    if data.get("category") == "work":
-        score += 2
+    if email_data.get("requires_reply"):
+        score += 1
+    if email_data.get("deadline"):
+        score += 1
     return score
 
 
-# ================= PLANNER ================= #
 
+
+# PLANNER 
 def _planner_prompt() -> str:
     return """
 You are an action planner.
@@ -160,7 +157,7 @@ Do not answer the user. Only output valid JSON.
 
 
 def plan_action(state: AgentState) -> AgentState:
-    llm = _llm(temperature=0)
+  
 
     latest_user = ""
     for msg in reversed(state.get("messages", [])):
@@ -168,7 +165,7 @@ def plan_action(state: AgentState) -> AgentState:
             latest_user = msg.content
             break
 
-    response = llm.invoke([
+    response = LLM.invoke([
         SystemMessage(content=_planner_prompt()),
         HumanMessage(content=latest_user)
     ])
@@ -194,11 +191,6 @@ def plan_action(state: AgentState) -> AgentState:
     if "reason" not in planned:
         planned["reason"] = "planned action"
 
-    if planned.get("name") == "get_emails":
-        query = str(planned["args"].get("query", "")).strip()
-        planned["args"]["query"] = query
-        planned["args"]["max_results"] = 20
-
     print("PLANNED:", planned)
 
     return {
@@ -213,7 +205,7 @@ def route_after_plan(state: AgentState):
     return "execute_action"
 
 
-# ================= TOOL EXECUTION ================= #
+# TOOL EXECUTION 
 
 def execute_action(state: AgentState) -> AgentState:
     action = state.get("planned_action", {})
@@ -225,8 +217,10 @@ def execute_action(state: AgentState) -> AgentState:
 
     try:
         if name == "get_emails":
+            base_query = "in:inbox category:primary"
+            query = f"{base_query} {args.get('query', '')}".strip()
             result = get_emails(
-                query=args.get("query", ""),
+                query=query,
                 max_results=int(args.get("max_results", 10))
             )
 
@@ -262,7 +256,7 @@ def execute_action(state: AgentState) -> AgentState:
         return {"last_result": {"ok": False, "error": str(e)}}
 
 
-# ================= EMAIL ANALYZER ================= #
+# EMAIL ANALYZER 
 
 def analyze_emails(state: AgentState) -> AgentState:
     last = state.get("last_result", {})
@@ -276,7 +270,7 @@ def analyze_emails(state: AgentState) -> AgentState:
             break
 
     emails = last.get("data", [])
-    llm = _llm(temperature=0)
+
 
     analyzed = []
 
@@ -306,7 +300,7 @@ Return:
 {{"relevant": false}}
 """
 
-        response = llm.invoke(combined_prompt)
+        response = LLM.invoke(combined_prompt)
         data = _extract_json(response.content)
 
         if not data.get("relevant"):
@@ -323,14 +317,14 @@ Return:
     return {"analyzed_emails": analyzed}
 
 
-# ================= RESPONDER ================= #
+# RESPONDER 
 
 def respond(state: AgentState) -> AgentState:
     action = state.get("planned_action", {}).get("name")
 
     # Direct generation
     if action == "respond":
-        llm = _llm()
+
 
         latest_user = ""
         for msg in reversed(state.get("messages", [])):
@@ -338,33 +332,33 @@ def respond(state: AgentState) -> AgentState:
                 latest_user = msg.content
                 break
 
-        response = llm.invoke(latest_user)
+        response = LLM.invoke(latest_user)
         return {"messages": [AIMessage(content=response.content)]}
 
     # Email summary
     if state.get("analyzed_emails"):
-        llm = _llm()
+
         prompt = f"""
 Summarize these results clearly for the user:
 
 {json.dumps(state['analyzed_emails'], indent=2)}
 """
-        response = llm.invoke(prompt)
+        response = LLM.invoke(prompt)
         return {"messages": [AIMessage(content=response.content)]}
 
     # Fallback explanation
-    llm = _llm()
+
     prompt = f"""
 Tool result:
 {json.dumps(state.get("last_result"), indent=2)}
 
 Explain clearly.
 """
-    response = llm.invoke(prompt)
+    response = LLM.invoke(prompt)
     return {"messages": [AIMessage(content=response.content)]}
 
 
-# ================= ROUTING ================= #
+#  ROUTING 
 
 def route_after_execute(state: AgentState):
     if state.get("last_result", {}).get("action") == "get_emails":
@@ -372,7 +366,7 @@ def route_after_execute(state: AgentState):
     return "respond"
 
 
-# ================= GRAPH ================= #
+# GRAPH 
 
 def build_graph():
     builder = StateGraph(AgentState)
