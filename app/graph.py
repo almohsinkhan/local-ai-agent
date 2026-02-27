@@ -16,7 +16,7 @@ from app.tools.search import web_search, get_latest_news
 
 load_dotenv()
 
-MODEL_NAME = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+MODEL_NAME = os.getenv("GROQ_MODEL", "llama3-8b-8192")
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY", "") or "").strip().strip('"').strip("'")
 GUARDED_ACTIONS = {"send_email", "add_event"}
 
@@ -113,41 +113,40 @@ Rules for email search planning:
 9) If request is not an email task, choose "respond".
 10) For get_emails always include args:
     - query: string
-    - max_results: 20
 
 Examples:
 User: "unread emails"
 {
   "name": "get_emails",
-  "args": {"query": "is:unread", "max_results": 20},
+  "args": {"query": "is:unread", "max_results": 5},
   "reason": "Search unread emails"
 }
 
 User: "check if there are any email from unstop"
 {
   "name": "get_emails",
-  "args": {"query": "from:unstop", "max_results": 20},
+  "args": {"query": "from:unstop", "max_results": 5},
   "reason": "Search by sender"
 }
 
 User: "any unread email from unstop"
 {
   "name": "get_emails",
-  "args": {"query": "from:unstop is:unread", "max_results": 20},
+  "args": {"query": "from:unstop is:unread", "max_results": 5},
   "reason": "Search unread from sender"
 }
 
 User: "is there any email about internship from unstop"
 {
   "name": "get_emails",
-  "args": {"query": "from:unstop internship", "max_results": 20},
+  "args": {"query": "from:unstop internship", "max_results": 5},
   "reason": "Search by sender + keyword"
 }
 
 User: "find emails about project update"
 {
   "name": "get_emails",
-  "args": {"query": "project update", "max_results": 20},
+  "args": {"query": "project update", "max_results": 5},
   "reason": "Keyword search"
 }
 
@@ -224,7 +223,7 @@ def execute_action(state: AgentState) -> AgentState:
             query = f"{base_query} {args.get('query', '')}".strip()
             result = get_emails(
                 query=query,
-                max_results=int(args.get("max_results", 10))
+                max_results=int(args.get("max_results", 5))
             )
 
         elif name == "send_email":
