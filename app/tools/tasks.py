@@ -4,7 +4,7 @@ from typing import Any
 from googleapiclient.discovery import build
 
 from app.observability import langsmith_traceable, timed
-from app.tools.calendar import _get_credentials, _parse_iso_datetime, normalize_to_calendar_tz
+from app.tools.calendar import _get_credentials, _parse_iso_datetime, normalize_to_calendar_tz 
 
 
 def _tasks_service():
@@ -66,17 +66,20 @@ def list_tasks(due_min_iso: str = "", due_max_iso: str = "", max_results: int = 
 
 @langsmith_traceable(name="complete_task", run_type="tool")
 @timed("complete_task")
-def complete_task(task_id: str) -> dict[str, Any]:
+def complete_task(task_ids: list[str]) -> dict[str, Any]:
     """Mark a task as completed by ID. Keep this behind human approval in the graph."""
     service = _tasks_service()
     now_iso = _to_utc_rfc3339(datetime.now(timezone.utc))
-    updated = service.tasks().patch(
-        tasklist="@default",
-        task=task_id,
-        body={"status": "completed", "completed": now_iso},
-    ).execute()
+    updated_tasks = []
+    for task_id in task_ids:
+        updated = service.tasks().patch(
+            tasklist="@default",
+            task=task_id,
+            body={"status": "completed", "completed": now_iso},
+        ).execute()
+        updated_tasks.append(updated)
     return {
-        "id": updated.get("id"),
+        "updated_tasks": updated_tasks,
         "title": updated.get("title"),
         "status": updated.get("status"),
         "completed": updated.get("completed"),

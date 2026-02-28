@@ -275,8 +275,13 @@ User: "find emails about project update"
 - due_min_iso: ISO8601 datetime (optional, resolve relative times using current date/time context)
 - due_max_iso: ISO8601 datetime (optional, resolve relative times using current date/time context)
 - max_results: integer (optional, default 10)
-19) if user asks to complete a task, choose "complete_task" with args:
-- task_id: string (the ID of the task to complete)
+19) if user asks to complete a task(s), choose "complete_task" with args:
+- task_ids: list of task titles or IDs 
+- If user says "mark all tasks", "complete all tasks",
+set args:
+{
+  "all": true
+}
 Do not answer the user. Only output valid JSON.
 """
 
@@ -363,8 +368,10 @@ def execute_action(state: AgentState) -> AgentState:
 
         elif name == "get_latest_news":
             result = get_latest_news(**args)
+
         elif name == "get_current_time_iso":
             result = get_current_time_iso()
+
         elif name == "add_task":
             result = add_task(
                 title=str(args.get("title", "")).strip(),
@@ -379,9 +386,47 @@ def execute_action(state: AgentState) -> AgentState:
             )
 
         elif name == "complete_task":
-            result = complete_task(
-                task_id=str(args.get("task_id", "")).strip()
-            )
+            if args.get("all") is True:
+                tasks = list_tasks(max_results=100)
+
+                if not tasks:
+                    result = {"message": "No open tasks."}
+                else:
+                    completed = []
+
+                    for task in tasks:
+                        complete_task(task_ids=[task["id"]])
+                        completed.append(task["title"])
+
+                    result = {
+                        "completed": completed,
+                        "count": len(completed)
+                    }
+            else:
+                user_value = args.get("task_ids", [])
+                if isinstance(user_value, str):
+                    user_value = [user_value]
+
+                task = list_tasks(max_results=50)
+                completed = []
+                not_found = []
+
+                for identifier in user_value:
+                    identifier = identifier.strip().lower()
+
+                    match = next((t for t in task if t.get("id", "").lower() == identifier or t.get("title", "").lower() == identifier), None)
+
+                    if not match:
+                        not_found.append(identifier)
+                        continue
+
+                    complete_task(task_ids=[match.get("id")])
+                    completed.append(match["title"])
+
+                result = {
+                    "completed": completed,
+                    "not_found": not_found
+                }
 
         else:
             result = {}
@@ -496,7 +541,17 @@ Tool result:
 
 Explain clearly.
 """
-    response = LLM.invoke(prompt)
+    response = LLM.invoke([
+    SystemMessage(content="""
+You are a personal desktop assistant.
+Speak clearly, simply, and concisely.
+Do not explain internal JSON.
+Do not mention tools or APIs.
+Respond like a helpful human assistant.
+Keep answers short unless user asks for details.
+"""),
+    HumanMessage(content=prompt)
+])
     return {"messages": [AIMessage(content=response.content)]}
 
 
