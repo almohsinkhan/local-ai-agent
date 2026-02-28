@@ -70,6 +70,10 @@ class AgentState(TypedDict, total=False):
     analyzed_emails: list[dict]
     human_approved: bool | None
 
+    last_email_results: list[dict]
+    last_actionable_emails: dict | None
+    last_task: list[dict]
+
 
 # UTIL 
 def _extract_json(raw: str) -> dict[str, Any]:
@@ -331,6 +335,10 @@ def execute_action(state: AgentState) -> AgentState:
                 query=query,
                 max_results=_as_positive_int(args.get("max_results"), 5, max_value=25),
             )
+            return {
+                "last_result": {"ok": True, "action": name, "data": result},
+                "last_email_results": result
+            }
 
         elif name == "send_email":
             result = send_email(
@@ -439,10 +447,15 @@ Return:
 
         analyzed.append(data)
 
+
     if not analyzed:
         return {"analyzed_emails": [{"message": "No relevant emails found."}]}
+    
 
-    return {"analyzed_emails": analyzed}
+    analyzed.sort(key=lambda x: x.get("priority_score", 0), reverse=True)
+      
+    return {"analyzed_emails": analyzed,
+            "last_actionable_emails": {email["id"]: email for email in emails if email.get("id") in {item.get("email_id") for item in analyzed}}}
 
 
 # RESPONDER 
