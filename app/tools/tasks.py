@@ -18,7 +18,7 @@ def _to_utc_rfc3339(dt: datetime) -> str:
 
 @langsmith_traceable(name="add_task", run_type="tool")
 @timed("add_task")
-def add_task(title: str, notes: str = "", due_iso: str = "") -> dict[str, Any]:
+def add_task(title: list[str], notes: str = "", due_iso: str = "") -> dict[str, Any]:
     """Create a task. Keep this behind human approval in the graph."""
     service = _tasks_service()
     clean_title = str(title or "").strip()

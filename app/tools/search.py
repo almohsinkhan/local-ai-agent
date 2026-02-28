@@ -1,12 +1,25 @@
 import os
 from typing import Any
 from dotenv import load_dotenv
-from ddgs import DDGS
-import feedparser
 
 from app.observability import langsmith_traceable, timed
 
 load_dotenv()
+
+
+def _get_ddgs_class():
+    """Resolve a DuckDuckGo search client class from available packages."""
+    try:
+        from ddgs import DDGS as _DDGS  # type: ignore
+
+        return _DDGS
+    except Exception:
+        try:
+            from duckduckgo_search import DDGS as _DDGS  # type: ignore
+
+            return _DDGS
+        except Exception:
+            return None
 
 
 @langsmith_traceable(name="web_search", run_type="tool")
@@ -46,7 +59,12 @@ def web_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
 
     # Fallback to DuckDuckGo
     try:
-        with DDGS() as ddgs:
+        ddgs_cls = _get_ddgs_class()
+        if ddgs_cls is None:
+            print("DuckDuckGo client not installed. Install `ddgs` or `duckduckgo-search`.")
+            return []
+
+        with ddgs_cls() as ddgs:
             rows = list(ddgs.text(query, max_results=max_results))
 
             return [
@@ -64,6 +82,12 @@ def web_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
 @langsmith_traceable(name="get_latest_news", run_type="tool")
 @timed("get_latest_news")
 def get_latest_news(max_results=5):
+    try:
+        import feedparser  # type: ignore
+    except Exception:
+        print("RSS parser not installed. Install `feedparser` to use latest news.")
+        return []
+
     feeds = [
         "https://feeds.bbci.co.uk/news/rss.xml",
         "https://feeds.reuters.com/reuters/topNews",

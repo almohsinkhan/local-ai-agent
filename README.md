@@ -1,35 +1,53 @@
 # Local AI Agent (LangGraph + Groq)
 
-A local AI assistant that uses LangGraph orchestration with Groq LLMs and optional external tools for Gmail, Google Calendar, web search, and RSS news.
+A local assistant built with a hybrid LangGraph architecture:
+
+- `LLM.bind_tools(...)` for native tool calling
+- `ToolNode` for execution
+- guarded approval gate before sensitive actions
+- deterministic task title-to-ID resolution inside tool logic
 
 ## Features
 
 - Email actions
-  - Read inbox messages with query filters
-  - Analyze and summarize relevant emails
-  - Send emails (requires explicit approval)
+  - Read inbox emails with query filters
+  - Send emails (approval required)
 - Calendar actions
   - List events
-  - Create events (requires explicit approval)
+  - Add events (approval required)
+- Tasks actions
+  - Add task (approval required)
+  - List tasks
+  - Complete one, many, or all tasks (approval required)
 - Search actions
-  - Web search (Tavily if configured, otherwise DuckDuckGo)
+  - Web search (Tavily if configured, fallback to DuckDuckGo)
   - Latest news headlines from RSS feeds
-- Observability
-  - LangSmith tracing for graph nodes, tools, and turn execution
-  - Local execution timing logs for key steps
-- Two interfaces
+- Interfaces
   - CLI chat (`main.py`)
   - Streamlit UI (`ui.py`)
+  - Telegram bot (`telegram_bot.py`)
+- Observability
+  - LangSmith tracing
+  - local timing logs
 
-## Tech Stack
+## Architecture
 
-- Python
-- LangGraph / LangChain Core
-- Groq (`langchain-groq`)
-- Google APIs (Gmail + Calendar OAuth)
-- DDGS / Tavily
-- Streamlit
-- LangSmith SDK
+Graph flow:
+
+`START -> assistant -> execute_action -> tools -> assistant -> END`
+
+Where:
+- `assistant` = LLM node with bound tools
+- `execute_action` = approval gate node
+- `tools` = `langgraph.prebuilt.ToolNode`
+
+State is minimal and structured (`AgentState`) with:
+- `messages`
+- `human_approved`
+- `planned_action`
+- `approval_rejected`
+- `last_email_results`
+- `last_tool_result`
 
 ## Project Structure
 
@@ -37,22 +55,33 @@ A local AI assistant that uses LangGraph orchestration with Groq LLMs and option
 .
 ├── app/
 │   ├── graph.py
+│   ├── agent/
+│   │   ├── state.py
+│   │   ├── runtime.py
+│   │   ├── tooling.py
+│   │   └── tools/
+│   │       ├── common.py
+│   │       ├── gmail_tools.py
+│   │       ├── calendar_tools.py
+│   │       ├── search_tools.py
+│   │       └── task_tools.py
 │   └── tools/
 │       ├── gmail.py
 │       ├── calendar.py
+│       ├── tasks.py
 │       └── search.py
 ├── main.py
 ├── ui.py
+├── telegram_bot.py
 ├── requirements.txt
-├── .env.example
 └── README.md
 ```
 
 ## Prerequisites
 
 - Python 3.10+
-- A Groq API key
-- Google Cloud OAuth client credentials (`credentials.json`) for Gmail/Calendar features
+- Groq API key
+- Google OAuth desktop credentials (`credentials.json`) for Gmail/Calendar/Tasks
 
 ## Setup
 
@@ -69,27 +98,25 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-3. Create your environment file:
+3. Create `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-4. Edit `.env` and set at least:
+4. Set required values:
 
 ```env
 GROQ_API_KEY=your_groq_api_key
 ```
 
-5. (Optional but recommended) Set search API key:
+5. Optional search API key:
 
 ```env
 TAVILY_API_KEY=your_tavily_key
 ```
 
-If `TAVILY_API_KEY` is not set, web search falls back to DuckDuckGo.
-
-6. Enable tracing and timing:
+6. Optional tracing/timing:
 
 ```env
 LANGSMITH_TRACING=true
@@ -98,30 +125,24 @@ LANGSMITH_PROJECT=local-agent
 ENABLE_TIME_TRACKING=true
 ```
 
-With `ENABLE_TIME_TRACKING=true`, the app prints timing lines like:
-- `[timing] plan_action: 120.52 ms`
-- `[timing] chat_turn: 954.10 ms`
+## Google OAuth Setup
 
-## Google OAuth Setup (Gmail + Calendar)
-
-1. In Google Cloud Console, enable:
+1. Enable in Google Cloud:
 - Gmail API
 - Google Calendar API
+- Google Tasks API
 
 2. Create OAuth client credentials (Desktop app).
 
-3. Download the JSON file and place it at project root as:
-- `credentials.json`
+3. Save credentials file as `credentials.json` in project root.
 
-4. Keep these env vars aligned with your files:
+4. Ensure scopes include Gmail, Calendar, and Tasks:
 
 ```env
-GOOGLE_CLIENT_SECRET_FILE=credentials.json
-GOOGLE_TOKEN_FILE=token.json
-GOOGLE_SCOPES=https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/gmail.send,https://www.googleapis.com/auth/calendar
+GOOGLE_SCOPES=https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/gmail.send,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/tasks
 ```
 
-On first Gmail/Calendar use, a browser auth flow opens and stores access tokens in `token.json`.
+On first authenticated action, browser-based OAuth runs and `token.json` is created/updated.
 
 ## Run
 
@@ -131,46 +152,58 @@ CLI:
 python main.py
 ```
 
-Streamlit UI:
+Streamlit:
 
 ```bash
 streamlit run ui.py
 ```
 
+Telegram:
+
+```bash
+python telegram_bot.py
+```
+
 ## Approval Flow
 
-Sensitive actions are guarded and require explicit approval before execution:
+Sensitive actions are interrupted before execution and require explicit approval:
 
-- `send_email`
-- `add_event`
+- `send_email_tool`
+- `add_event_tool`
+- `add_task_tool`
+- `complete_task_tool`
 
-In CLI, you will see an approval prompt. In Streamlit, Approve/Reject buttons are shown.
+## Checkpointing
+
+- Default: in-memory checkpointing (`MemorySaver`)
+- Optional: pass `sqlite_path` to `build_graph(sqlite_path="...")` to use SQLite saver if available
 
 ## Environment Variables
 
-Defined in `.env.example`:
+Common vars:
 
-- `GROQ_MODEL` (default: `openai/gpt-oss-120b`)
+- `GROQ_MODEL`
 - `GROQ_API_KEY`
-- `LANGSMITH_TRACING` (default in sample: `true`)
-- `LANGSMITH_API_KEY`
-- `LANGSMITH_PROJECT` (example: `local-agent`)
-- `LANGSMITH_ENDPOINT` (optional; defaults to LangSmith cloud endpoint)
-- `ENABLE_TIME_TRACKING` (default in sample: `true`)
 - `TAVILY_API_KEY` (optional)
 - `GOOGLE_CLIENT_SECRET_FILE`
 - `GOOGLE_TOKEN_FILE`
 - `GOOGLE_SCOPES`
-- `GMAIL_USER_ID` (default: `me`)
-- `CALENDAR_ID` (default: `primary`)
-- `TIMEZONE` (default: `UTC`)
+- `GMAIL_USER_ID`
+- `CALENDAR_ID`
+- `TIMEZONE`
+- `TELEGRAM_BOT_TOKEN` (for Telegram bot)
+- `LANGSMITH_TRACING`
+- `LANGSMITH_API_KEY`
+- `LANGSMITH_PROJECT`
+- `LANGSMITH_ENDPOINT`
+- `ENABLE_TIME_TRACKING`
 
 ## Troubleshooting
 
 - `Missing GROQ_API_KEY`
-  - Add `GROQ_API_KEY` to `.env` and restart.
-- Google auth errors
-  - Ensure `credentials.json` exists and APIs are enabled in Google Cloud.
+  - Add `GROQ_API_KEY` to `.env`.
+- Google permission errors
+  - Ensure APIs are enabled and scopes include Tasks if task operations fail.
   - Delete `token.json` and re-authenticate if scopes changed.
-- Search results empty
-  - Try again with a different query or configure `TAVILY_API_KEY`.
+- Empty search results
+  - Retry with a different query or configure `TAVILY_API_KEY`.
