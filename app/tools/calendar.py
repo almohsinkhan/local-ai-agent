@@ -1,7 +1,9 @@
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
@@ -49,52 +51,106 @@ def _calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 
+def _configured_timezone_name() -> str:
+    return (TIMEZONE or "").strip() or "UTC"
+
+
+@lru_cache(maxsize=1)
+def _calendar_timezone_name() -> str:
+    try:
+        service = _calendar_service()
+        calendar = service.calendars().get(calendarId=CALENDAR_ID).execute()
+        tz_name = str(calendar.get("timeZone", "")).strip()
+        if tz_name:
+            return tz_name
+    except Exception:
+        pass
+    return "UTC"
+
+
+def effective_timezone_name() -> str:
+    configured = _configured_timezone_name()
+    # If configured timezone is UTC, prefer the calendar's own timezone.
+    # This prevents local-time intents (e.g., "4 PM") from shifting unexpectedly.
+    if configured.upper() == "UTC":
+        return _calendar_timezone_name()
+    return configured
+
+
+def _calendar_tz():
+    tz_name = effective_timezone_name()
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return timezone.utc
+
+
+def normalize_to_calendar_tz(dt: datetime) -> datetime:
+    tz = _calendar_tz()
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tz)
+    return dt.astimezone(tz)
+
+
+def _parse_iso_datetime(value: str, field_name: str) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError(f"Missing required field: {field_name}")
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid {field_name}: {raw!r}. Use ISO format like '2026-02-28T09:00:00'."
+        ) from exc
+
+
 @langsmith_traceable(name="list_events", run_type="tool")
 @timed("list_events")
-def list_events(time_min: str, time_max: str, max_results: int = 10) -> list[dict[str, Any]]:
-    """List events in a time window (ISO8601 timestamps)."""
+def list_events(time_min: str, time_max: str, max_results: int = 10):
     service = _calendar_service()
+
+    # Convert to proper datetime objects
+    start_dt = _parse_iso_datetime(time_min, "time_min")
+    end_dt = _parse_iso_datetime(time_max, "time_max")
+
+    start_dt = normalize_to_calendar_tz(start_dt)
+    end_dt = normalize_to_calendar_tz(end_dt)
+
     events_result = (
         service.events()
         .list(
             calendarId=CALENDAR_ID,
-            timeMin=time_min,
-            timeMax=time_max,
+            timeMin=start_dt.isoformat(),
+            timeMax=end_dt.isoformat(),
             singleEvents=True,
             orderBy="startTime",
             maxResults=max_results,
         )
         .execute()
     )
-    events = events_result.get("items", [])
-    output: list[dict[str, Any]] = []
 
-    for event in events:
-        output.append(
-            {
-                "id": event.get("id"),
-                "summary": event.get("summary", "(no title)"),
-                "start": event.get("start", {}).get("dateTime", event.get("start", {}).get("date")),
-                "end": event.get("end", {}).get("dateTime", event.get("end", {}).get("date")),
-                "htmlLink": event.get("htmlLink", ""),
-            }
-        )
-
-    return output
-
+    return events_result.get("items", [])
 
 @langsmith_traceable(name="add_event", run_type="tool")
 @timed("add_event")
 def add_event(summary: str, start_iso: str, end_iso: str, description: str = "", location: str = "") -> dict[str, Any]:
     """Create an event. Keep this behind human approval in the graph."""
+    start_dt = _parse_iso_datetime(start_iso, "start_iso")
+    end_dt = _parse_iso_datetime(end_iso, "end_iso")
+    start_dt = normalize_to_calendar_tz(start_dt)
+    end_dt = normalize_to_calendar_tz(end_dt)
+    if end_dt <= start_dt:
+        raise ValueError("Invalid event range: end_iso must be later than start_iso.")
+
     service = _calendar_service()
+    tz_name = effective_timezone_name()
 
     event_body = {
         "summary": summary,
         "description": description,
         "location": location,
-        "start": {"dateTime": start_iso, "timeZone": TIMEZONE},
-        "end": {"dateTime": end_iso, "timeZone": TIMEZONE},
+        "start": {"dateTime": start_dt.isoformat(timespec="seconds"), "timeZone": tz_name},
+        "end": {"dateTime": end_dt.isoformat(timespec="seconds"), "timeZone": tz_name},
     }
 
     created = service.events().insert(calendarId=CALENDAR_ID, body=event_body).execute()
@@ -106,6 +162,14 @@ def add_event(summary: str, start_iso: str, end_iso: str, description: str = "",
         "htmlLink": created.get("htmlLink", ""),
     }
 
+def get_current_time_iso() -> str:
+    """Get the current time in ISO8601 format."""
+    tz_name = effective_timezone_name()
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    return datetime.now(tz).replace(microsecond=0).isoformat(timespec="seconds")
 
 def now_utc_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

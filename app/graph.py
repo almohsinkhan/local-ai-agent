@@ -1,6 +1,8 @@
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal, TypedDict
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
@@ -10,15 +12,25 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from app.observability import langsmith_traceable, timed
-from app.tools.calendar import add_event, list_events, now_utc_iso
+from app.tools.calendar import add_event, effective_timezone_name, get_current_time_iso, list_events
 from app.tools.gmail import get_emails, send_email
 from app.tools.search import web_search, get_latest_news
 
 load_dotenv()
 
-MODEL_NAME = os.getenv("GROQ_MODEL", "llama3-8b-8192")
+MODEL_NAME = os.getenv("GROQ_MODEL", "moonshotai/kimi-k2-instruct-0905")
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY", "") or "").strip().strip('"').strip("'")
 GUARDED_ACTIONS = {"send_email", "add_event"}
+ALLOWED_ACTIONS = {
+    "respond",
+    "get_emails",
+    "send_email",
+    "list_events",
+    "add_event",
+    "web_search",
+    "get_latest_news",
+    "get_current_time_iso"
+}
 
 # create llm instance
 LLM = ChatGroq(
@@ -37,7 +49,8 @@ class PlannedAction(TypedDict, total=False):
         "list_events",
         "add_event",
         "web_search",
-        "get_latest_news"
+        "get_latest_news",
+        "get_current_time_iso"
     ]
     args: dict[str, Any]
     reason: str
@@ -53,15 +66,68 @@ class AgentState(TypedDict, total=False):
 
 # UTIL 
 def _extract_json(raw: str) -> dict[str, Any]:
+    text = str(raw).strip()
     try:
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            if raw.startswith("json"):
-                raw = raw[4:].strip()
-        return json.loads(raw)
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+
+        return json.loads(text)
     except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end >= start:
+            try:
+                return json.loads(text[start : end + 1])
+            except Exception:
+                return {}
         return {}
+
+
+def _latest_human_message(messages: list[AnyMessage]) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            return str(msg.content)
+    return ""
+
+
+def _as_positive_int(value: Any, default: int, *, min_value: int = 1, max_value: int = 50) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(min_value, min(parsed, max_value))
+
+
+def _normalize_add_event_args(raw_args: dict[str, Any]) -> dict[str, Any]:
+    args = dict(raw_args or {})
+    tz_name = effective_timezone_name()
+    if tz_name.upper() == "UTC":
+        return args
+
+    for key in ("start_iso", "end_iso"):
+        value = args.get(key)
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if not text:
+            continue
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+
+        # Planner sometimes returns +00:00 even for local-time intents.
+        # Keep wall-clock time and drop the UTC offset so calendar timezone is used.
+        if parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0):
+            args[key] = parsed.replace(tzinfo=None).isoformat(timespec="seconds")
+    return args
     
 def calculate_priority(email_data: dict) -> int:
     score = 0
@@ -73,6 +139,30 @@ def calculate_priority(email_data: dict) -> int:
         score += 1
     return score
 
+
+def _default_calendar_range(days_ahead: int = 7) -> tuple[str, str]:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    end = now + timedelta(days=days_ahead)
+    return now.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")
+
+
+def _current_datetime_context() -> str:
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    tz_name = effective_timezone_name()
+    try:
+        local_tz = ZoneInfo(tz_name)
+    except Exception:
+        tz_name = "UTC"
+        local_tz = timezone.utc
+    now_local = now_utc.astimezone(local_tz)
+    return (
+        "Current date/time context for planning calendar tasks:\n"
+        f"- UTC now: {now_utc.isoformat().replace('+00:00', 'Z')}\n"
+        f"- Local now ({tz_name}): {now_local.isoformat()}\n"
+        "Use local timezone for scheduling requests unless user explicitly asks for another timezone. "
+        "For add_event start/end, prefer local datetime format without UTC suffix (YYYY-MM-DDTHH:MM:SS). "
+        "Use this context for relative dates like today/tomorrow/next week. Do not invent impossible dates."
+    )
 
 
 
@@ -95,8 +185,8 @@ Allowed actions:
 - add_event
 - web_search
 - get_latest_news
-
-Rules for email search planning:
+- get_current_time_iso
+Planning rules:
 1) If user asks to check/find/search emails, choose "get_emails".
 2) If user mentions "unread", include: is:unread
 3) If user mentions sender/person ("from John", "email from Amazon"), include: from:<sender>
@@ -110,8 +200,20 @@ Rules for email search planning:
    - "unread emails about job" -> "job is:unread"
 7) For general email search, use get_emails with keyword query only.
 8) If user wants to send an email, choose "send_email".
-9) If request is not an email task, choose "respond".
-10) For get_emails always include args:
+9) If user asks to check/list/show calendar events, choose "list_events".
+10) For "list_events", include args when available:
+    - time_min: ISO8601 datetime
+    - time_max: ISO8601 datetime
+    - max_results: integer
+11) If user asks to create/schedule/add a calendar event, choose "add_event".
+12) For "add_event", include:
+    - summary, start_iso, end_iso
+    Optional: description, location
+    - Resolve relative dates/times (today, tomorrow, next Monday) using provided current date/time context.
+    - Use local timezone time values; do not output Z or +00:00 unless user explicitly asks for UTC.
+13) If user asks to search web/news, choose "web_search" or "get_latest_news".
+14) If no tool fits, choose "respond".
+15) For get_emails always include args:
     - query: string
 
 Examples:
@@ -150,6 +252,7 @@ User: "find emails about project update"
   "reason": "Keyword search"
 }
 
+16) if user asks for current time, choose "get_current_time_iso" with no args.
 Do not answer the user. Only output valid JSON.
 """
 
@@ -157,33 +260,17 @@ Do not answer the user. Only output valid JSON.
 @langsmith_traceable(name="plan_action", run_type="chain")
 @timed("plan_action")
 def plan_action(state: AgentState) -> AgentState:
-  
-
-    latest_user = ""
-    for msg in reversed(state.get("messages", [])):
-        if isinstance(msg, HumanMessage):
-            latest_user = msg.content
-            break
+    latest_user = _latest_human_message(state.get("messages", []))
 
     response = LLM.invoke([
         SystemMessage(content=_planner_prompt()),
+        SystemMessage(content=_current_datetime_context()),
         HumanMessage(content=latest_user)
     ])
 
     planned = _extract_json(response.content)
 
-    # Validate action
-    allowed = {
-        "respond",
-        "get_emails",
-        "send_email",
-        "list_events",
-        "add_event",
-        "web_search",
-        "get_latest_news"
-    }
-
-    if planned.get("name") not in allowed:
+    if planned.get("name") not in ALLOWED_ACTIONS:
         planned = {"name": "respond", "args": {}, "reason": "fallback"}
 
     if "args" not in planned:
@@ -191,15 +278,13 @@ def plan_action(state: AgentState) -> AgentState:
     if "reason" not in planned:
         planned["reason"] = "planned action"
 
-    print("PLANNED:", planned)
-
     return {
         "planned_action": planned,
         "human_approved": None
     }
 
 
-def route_after_plan(state: AgentState):
+def route_after_plan(state: AgentState) -> str:
     if state.get("planned_action", {}).get("name") == "respond":
         return "respond"
     return "execute_action"
@@ -220,10 +305,11 @@ def execute_action(state: AgentState) -> AgentState:
     try:
         if name == "get_emails":
             base_query = "in:inbox category:primary"
-            query = f"{base_query} {args.get('query', '')}".strip()
+            user_query = str(args.get("query", "")).strip()
+            query = f"{base_query} {user_query}".strip()
             result = get_emails(
                 query=query,
-                max_results=int(args.get("max_results", 5))
+                max_results=_as_positive_int(args.get("max_results"), 5, max_value=25),
             )
 
         elif name == "send_email":
@@ -234,20 +320,23 @@ def execute_action(state: AgentState) -> AgentState:
             )
 
         elif name == "list_events":
+            default_min, default_max = _default_calendar_range()
             result = list_events(
-                time_min=now_utc_iso(),
-                time_max=now_utc_iso(),
-                max_results=10
+                time_min=args.get("time_min", default_min),
+                time_max=args.get("time_max", default_max),
+                max_results=_as_positive_int(args.get("max_results"), 10, max_value=25),
             )
 
         elif name == "add_event":
-            result = add_event(**args)
+            result = add_event(**_normalize_add_event_args(args))
 
         elif name == "web_search":
             result = web_search(**args)
 
         elif name == "get_latest_news":
             result = get_latest_news(**args)
+        elif name == "get_current_time_iso":
+            result = get_current_time_iso()
 
         else:
             result = {}
@@ -267,13 +356,11 @@ def analyze_emails(state: AgentState) -> AgentState:
     if not last.get("ok") or last.get("action") != "get_emails":
         return {}
 
-    user_query = ""
-    for msg in reversed(state.get("messages", [])):
-        if isinstance(msg, HumanMessage):
-            user_query = msg.content
-            break
+    user_query = _latest_human_message(state.get("messages", []))
 
     emails = last.get("data", [])
+    if not emails:
+        return {"analyzed_emails": [{"message": "No emails found."}]}
 
 
     analyzed = []
@@ -327,19 +414,18 @@ Return:
 @timed("respond")
 def respond(state: AgentState) -> AgentState:
     action = state.get("planned_action", {}).get("name")
+    last_result = state.get("last_result", {})
 
     # Direct generation
     if action == "respond":
-
-
-        latest_user = ""
-        for msg in reversed(state.get("messages", [])):
-            if isinstance(msg, HumanMessage):
-                latest_user = msg.content
-                break
-
+        latest_user = _latest_human_message(state.get("messages", []))
         response = LLM.invoke(latest_user)
         return {"messages": [AIMessage(content=response.content)]}
+
+    # Return explicit tool errors directly instead of rephrasing with the LLM.
+    if isinstance(last_result, dict) and not last_result.get("ok", True):
+        error = str(last_result.get("error", "Tool execution failed."))
+        return {"messages": [AIMessage(content=f"Could not complete `{action}`: {error}")]}
 
     # Email summary
     if state.get("analyzed_emails"):
@@ -356,7 +442,7 @@ Summarize these results clearly for the user:
 
     prompt = f"""
 Tool result:
-{json.dumps(state.get("last_result"), indent=2)}
+{json.dumps(last_result, indent=2)}
 
 Explain clearly.
 """
@@ -366,7 +452,7 @@ Explain clearly.
 
 #  ROUTING 
 
-def route_after_execute(state: AgentState):
+def route_after_execute(state: AgentState) -> str:
     if state.get("last_result", {}).get("action") == "get_emails":
         return "analyze_emails"
     return "respond"
