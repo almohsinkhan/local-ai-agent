@@ -15,12 +15,13 @@ from app.observability import langsmith_traceable, timed
 from app.tools.calendar import add_event, effective_timezone_name, get_current_time_iso, list_events
 from app.tools.gmail import get_emails, send_email
 from app.tools.search import web_search, get_latest_news
+from app.tools.tasks import add_task, complete_task, list_tasks
 
 load_dotenv()
 
 MODEL_NAME = os.getenv("GROQ_MODEL", "moonshotai/kimi-k2-instruct-0905")
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY", "") or "").strip().strip('"').strip("'")
-GUARDED_ACTIONS = {"send_email", "add_event"}
+GUARDED_ACTIONS = {"send_email", "add_event","add_task"}
 ALLOWED_ACTIONS = {
     "respond",
     "get_emails",
@@ -29,7 +30,10 @@ ALLOWED_ACTIONS = {
     "add_event",
     "web_search",
     "get_latest_news",
-    "get_current_time_iso"
+    "get_current_time_iso",
+    "add_task",
+    "list_tasks",
+    "complete_task"
 }
 
 # create llm instance
@@ -50,7 +54,10 @@ class PlannedAction(TypedDict, total=False):
         "add_event",
         "web_search",
         "get_latest_news",
-        "get_current_time_iso"
+        "get_current_time_iso",
+        "add_task",
+        "list_tasks",
+        "complete_task"
     ]
     args: dict[str, Any]
     reason: str
@@ -186,6 +193,9 @@ Allowed actions:
 - web_search
 - get_latest_news
 - get_current_time_iso
+- add_task
+- list_tasks
+- complete_task
 Planning rules:
 1) If user asks to check/find/search emails, choose "get_emails".
 2) If user mentions "unread", include: is:unread
@@ -253,6 +263,16 @@ User: "find emails about project update"
 }
 
 16) if user asks for current time, choose "get_current_time_iso" with no args.
+17) if user asks to create a task, choose "add_task" with args:
+- title: string
+- notes: string (optional)
+- due_iso: ISO8601 datetime (optional, resolve relative times using current date/time context)
+18) if user asks to list tasks, choose "list_tasks" with args:
+- due_min_iso: ISO8601 datetime (optional, resolve relative times using current date/time context)
+- due_max_iso: ISO8601 datetime (optional, resolve relative times using current date/time context)
+- max_results: integer (optional, default 10)
+19) if user asks to complete a task, choose "complete_task" with args:
+- task_id: string (the ID of the task to complete)
 Do not answer the user. Only output valid JSON.
 """
 
@@ -337,6 +357,23 @@ def execute_action(state: AgentState) -> AgentState:
             result = get_latest_news(**args)
         elif name == "get_current_time_iso":
             result = get_current_time_iso()
+        elif name == "add_task":
+            result = add_task(
+                title=str(args.get("title", "")).strip(),
+                notes=str(args.get("notes", "")),
+                due_iso=str(args.get("due_iso", "")).strip(),
+            )
+        elif name == "list_tasks":
+            result = list_tasks(
+                due_min_iso=str(args.get("due_min_iso", "")).strip(),
+                due_max_iso=str(args.get("due_max_iso", "")).strip(),
+                max_results=_as_positive_int(args.get("max_results"), 10, max_value=25),
+            )
+
+        elif name == "complete_task":
+            result = complete_task(
+                task_id=str(args.get("task_id", "")).strip()
+            )
 
         else:
             result = {}

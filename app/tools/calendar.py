@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -18,7 +19,7 @@ SCOPES = [
     scope.strip()
     for scope in os.getenv(
         "GOOGLE_SCOPES",
-        "https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/gmail.send,https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/gmail.send,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/tasks",
     ).split(",")
     if scope.strip()
 ]
@@ -27,20 +28,52 @@ TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 CALENDAR_ID = os.getenv("CALENDAR_ID", "primary")
 TIMEZONE = os.getenv("TIMEZONE", "UTC")
 
-
 def _get_credentials() -> Credentials:
     creds = None
     token_path = Path(TOKEN_FILE)
+    token_granted_scopes: set[str] = set()
 
     if token_path.exists():
+        try:
+            token_payload = json.loads(token_path.read_text(encoding="utf-8"))
+            raw_scopes = token_payload.get("scopes", [])
+            if isinstance(raw_scopes, str):
+                token_granted_scopes = {s for s in raw_scopes.split() if s}
+            elif isinstance(raw_scopes, list):
+                token_granted_scopes = {str(s).strip() for s in raw_scopes if str(s).strip()}
+        except Exception:
+            token_granted_scopes = set()
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
 
-    if not creds or not creds.valid:
+    needs_oauth = not creds
+    if creds:
+        # Existing token.json can be missing newly added scopes (e.g. Google Tasks).
+        # Check granted scopes from token payload because creds.has_scopes can be misleading
+        # when credentials are loaded with requested scopes.
+        if token_granted_scopes and not set(SCOPES).issubset(token_granted_scopes):
+            needs_oauth = True
+        elif not token_granted_scopes:
+            # Unknown scope state: prefer re-auth to avoid runtime permission failures.
+            needs_oauth = True
+
+    if not needs_oauth and creds and not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
+            needs_oauth = True
+
+    if needs_oauth:
+        flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+        creds = flow.run_local_server(port=0)
+        token_path.write_text(creds.to_json(), encoding="utf-8")
+
+    if creds and not creds.valid and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        token_path.write_text(creds.to_json(), encoding="utf-8")
+    elif creds and not creds.valid:
+        # Fallback for any other invalid credential state.
+        flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+        creds = flow.run_local_server(port=0)
         token_path.write_text(creds.to_json(), encoding="utf-8")
 
     return creds
