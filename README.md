@@ -1,4 +1,4 @@
-# Local AI Agent (LangGraph + Groq)
+# Local AI Agent (LangGraph + Groq + Ollama Fallback)
 
 A local assistant built with a hybrid LangGraph architecture:
 
@@ -6,6 +6,7 @@ A local assistant built with a hybrid LangGraph architecture:
 - `ToolNode` for execution
 - guarded approval gate before sensitive actions
 - deterministic task title-to-ID resolution inside tool logic
+- Groq-first inference with retry/backoff and Ollama fallback (tool-calling preserved)
 
 ## Features
 
@@ -29,6 +30,10 @@ A local assistant built with a hybrid LangGraph architecture:
 - Observability
   - LangSmith tracing
   - local timing logs
+- Runtime resilience
+  - retries Groq on overload/rate-limit errors (`503`, `429`, capacity/rate-limit messages)
+  - exponential backoff + jitter
+  - falls back to Ollama with `bind_tools(...)` so graph routing remains consistent
 
 ## Architecture
 
@@ -81,6 +86,7 @@ State is minimal and structured (`AgentState`) with:
 
 - Python 3.10+
 - Groq API key
+- Ollama (optional, for fallback) with a local pulled model
 - Google OAuth desktop credentials (`credentials.json`) for Gmail/Calendar/Tasks
 
 ## Setup
@@ -98,6 +104,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Optional Ollama integration dependency:
+
+```bash
+pip install langchain-ollama
+```
+
 3. Create `.env`:
 
 ```bash
@@ -110,13 +122,20 @@ cp .env.example .env
 GROQ_API_KEY=your_groq_api_key
 ```
 
-5. Optional search API key:
+5. Optional Ollama fallback values:
+
+```env
+OLLAMA_MODEL=qwen2.5:7b
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+6. Optional search API key:
 
 ```env
 TAVILY_API_KEY=your_tavily_key
 ```
 
-6. Optional tracing/timing:
+7. Optional tracing/timing:
 
 ```env
 LANGSMITH_TRACING=true
@@ -184,6 +203,8 @@ Common vars:
 
 - `GROQ_MODEL`
 - `GROQ_API_KEY`
+- `OLLAMA_MODEL` (optional)
+- `OLLAMA_BASE_URL` (optional)
 - `TAVILY_API_KEY` (optional)
 - `GOOGLE_CLIENT_SECRET_FILE`
 - `GOOGLE_TOKEN_FILE`
@@ -202,6 +223,10 @@ Common vars:
 
 - `Missing GROQ_API_KEY`
   - Add `GROQ_API_KEY` to `.env`.
+- Groq overload/rate-limit errors
+  - Runtime retries automatically before fallback.
+  - Ensure Ollama is running locally if fallback is expected: `ollama serve`
+  - Ensure configured `OLLAMA_MODEL` is pulled: `ollama pull <model>`
 - Google permission errors
   - Ensure APIs are enabled and scopes include Tasks if task operations fail.
   - Delete `token.json` and re-authenticate if scopes changed.

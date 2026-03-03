@@ -20,4 +20,5 @@ class AgentState(TypedDict, total=False):
     planned_action: PlannedAction
     approval_rejected: bool
     last_email_results: list[dict[str, Any]]
-    last_tool_result: Any
+    last_tool_result: list[dict[str, Any]]
+    tool_call_count: int

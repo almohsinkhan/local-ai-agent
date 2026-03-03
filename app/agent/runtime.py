@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import time
 from datetime import datetime, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -9,6 +11,11 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_groq import ChatGroq
+
+try:
+    from langchain_ollama import ChatOllama
+except Exception:  # pragma: no cover - optional dependency
+    ChatOllama = None
 
 from app.agent.state import AgentState
 from app.agent.tooling import GUARDED_ACTIONS, TOOLS
@@ -19,10 +26,52 @@ load_dotenv()
 
 MODEL_NAME = os.getenv("GROQ_MODEL", "moonshotai/kimi-k2-instruct-0905")
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY", "") or "").strip().strip('"').strip("'")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 LLM = ChatGroq(model=MODEL_NAME, temperature=0, api_key=GROQ_API_KEY)
 LLM_WITH_TOOLS = LLM.bind_tools(TOOLS)
+OLLAMA_LLM = (
+    ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, temperature=0)
+    if ChatOllama is not None
+    else None
+)
+OLLAMA_WITH_TOOLS = OLLAMA_LLM.bind_tools(TOOLS) if OLLAMA_LLM is not None else None
 
+
+def _is_capacity_or_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "503" in text
+        or "429" in text
+        or "over capacity" in text
+        or "rate limit" in text
+        or "rate_limit" in text
+        or "too many requests" in text
+    )
+
+
+def invoke_with_resilience(messages: list, retries: int = 2):
+    attempts = max(1, retries + 1)
+    last_error: Exception | None = None
+
+    for attempt in range(attempts):
+        try:
+            return LLM_WITH_TOOLS.invoke(messages)
+        except Exception as exc:
+            if not _is_capacity_or_rate_limit_error(exc):
+                raise
+            last_error = exc
+            if attempt < attempts - 1:
+                wait = (2**attempt) + random.random()
+                time.sleep(wait)
+
+    if OLLAMA_WITH_TOOLS is not None:
+        return OLLAMA_WITH_TOOLS.invoke(messages)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Primary model failed and fallback model is unavailable.")
 
 def _current_datetime_context() -> str:
     now_utc = datetime.now(timezone.utc).replace(microsecond=0)
@@ -121,19 +170,76 @@ def _compact_runtime_messages(messages: list) -> list:
     return [messages[idx] for idx in selected_indices]
 
 
+def _extract_intent_with_ollama(runtime_messages: list) -> dict[str, Any] | None:
+    if OLLAMA_LLM is None or not runtime_messages:
+        return None
+
+    latest_human = next((msg for msg in reversed(runtime_messages) if isinstance(msg, HumanMessage)), None)
+    if latest_human is None:
+        return None
+
+    try:
+        intent_response = OLLAMA_LLM.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Extract intent from the user's latest message and return compact JSON with keys: "
+                        "intent, entities, urgency, needs_tool. No markdown."
+                    )
+                ),
+                HumanMessage(content=str(latest_human.content)),
+            ]
+        )
+        parsed = _safe_json_load(intent_response.content)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
 @langsmith_traceable(name="assistant", run_type="chain")
 @timed("assistant")
 def assistant(state: AgentState) -> AgentState:
     messages = state.get("messages", [])
     runtime_messages = _compact_runtime_messages(messages)
-    response = LLM_WITH_TOOLS.invoke([SystemMessage(content=_assistant_system_prompt()), *runtime_messages])
+    intent_context = _extract_intent_with_ollama(runtime_messages)
+
+    MAX_TOOL_CALLS = 3
+    current_count = state.get("tool_call_count", 0)
+
+    system_prompt = _assistant_system_prompt()
+
+    if intent_context:
+        system_prompt = (
+            f"{system_prompt}\n\nParsed user intent: "
+            f"{json.dumps(intent_context, ensure_ascii=True)}"
+        )
+
+    model_messages = [SystemMessage(content=system_prompt), *runtime_messages]
+
+    if current_count >= MAX_TOOL_CALLS:
+        final_messages = [
+            SystemMessage(
+                content="You already have enough information. "
+                        "Provide the final answer without calling any tools."
+            ),
+            *runtime_messages,
+        ]
+        response = LLM.invoke(final_messages)
+        tool_calls = []
+    else:
+        response = invoke_with_resilience(model_messages)
+        tool_calls = response.tool_calls or []
+
+    new_count = current_count + len(tool_calls)
 
     updates: AgentState = {
         "messages": [response],
         "approval_rejected": False,
+        "tool_call_count": new_count,
     }
 
-    first_call = response.tool_calls[0] if response.tool_calls else None
+    first_call = tool_calls[0] if tool_calls else None
+
     if first_call:
         updates["planned_action"] = {
             "name": str(first_call.get("name", "")),
@@ -147,7 +253,10 @@ def assistant(state: AgentState) -> AgentState:
     if latest_outputs:
         updates["last_tool_result"] = latest_outputs
         for output in latest_outputs:
-            if output.get("name") == "get_emails_tool" and isinstance(output.get("content"), list):
+            if (
+                output.get("name") == "get_emails_tool"
+                and isinstance(output.get("content"), list)
+            ):
                 updates["last_email_results"] = output["content"]
 
     return updates
